@@ -24,19 +24,18 @@ function doPost(e) {
   try {
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
     
-    // Se a planilha estiver em branco, cria o cabeçalho formatado
+    // Se a planilha estiver em branco, cria o cabeçalho formatado (5 colunas)
     if (sheet.getLastRow() === 0) {
       sheet.appendRow([
         "Data / Hora",
         "Descrição do Material / Equipamento",
         "Nº Carga / Lote",
         "Conferente",
-        "Origem Leitura",
-        "ID de Registro"
+        "Origem Leitura"
       ]);
       
       // Estiliza o cabeçalho (Verde escuro, texto branco em negrito)
-      var headerRange = sheet.getRange(1, 1, 1, 6);
+      var headerRange = sheet.getRange(1, 1, 1, 5);
       headerRange.setFontWeight("bold");
       headerRange.setBackground("#059669");
       headerRange.setFontColor("#ffffff");
@@ -49,14 +48,13 @@ function doPost(e) {
     // Lê os dados enviados pelo leitor do celular
     var data = JSON.parse(e.postData.contents);
 
-    // Insere a nova linha com os dados da conferência
+    // Insere a nova linha com os dados da conferência (sem ID)
     sheet.appendRow([
       data.timestamp || new Date().toLocaleString("pt-BR"),
       data.description || "Sem descrição",
       data.batch || "SEM LOTE",
       data.operator || "Geral",
-      data.source || "QR Code",
-      data.id || ("ID_" + Date.now())
+      data.source || "QR Code"
     ]);
 
     // Retorna resposta de sucesso em JSON

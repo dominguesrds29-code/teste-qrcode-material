@@ -807,9 +807,8 @@ function exportToCsv() {
     return;
   }
 
-  const headers = ['ID', 'Data/Hora', 'Descricao', 'Carga_Lote', 'Conferente', 'Origem', 'Status'];
+  const headers = ['Data/Hora', 'Descricao', 'Carga_Lote', 'Conferente', 'Origem', 'Status'];
   const rows = state.items.map(item => [
-    `"${item.id}"`,
     `"${item.timestamp}"`,
     `"${(item.description || '').replace(/"/g, '""')}"`,
     `"${item.batch}"`,
@@ -858,23 +857,21 @@ function doPost(e) {
         "Descrição do Material / Equipamento",
         "Nº Carga / Lote",
         "Conferente",
-        "Origem",
-        "ID de Registro"
+        "Origem"
       ]);
-      // Formata o cabeçalho em negrito
-      sheet.getRange(1, 1, 1, 6).setFontWeight("bold").setBackground("#10b981").setFontColor("#ffffff");
+      // Formata o cabeçalho em negrito (5 colunas)
+      sheet.getRange(1, 1, 1, 5).setFontWeight("bold").setBackground("#10b981").setFontColor("#ffffff");
     }
 
     var data = JSON.parse(e.postData.contents);
 
-    // Adiciona a nova linha de conferência
+    // Adiciona a nova linha de conferência (sem ID)
     sheet.appendRow([
       data.timestamp || new Date().toLocaleString("pt-BR"),
       data.description || "Sem descrição",
       data.batch || "SEM LOTE",
       data.operator || "Geral",
-      data.source || "QR Code",
-      data.id || ("ID_" + Date.now())
+      data.source || "QR Code"
     ]);
 
     return ContentService.createTextOutput(JSON.stringify({
