@@ -9,9 +9,17 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
-  <!-- QR Code Scanning Engines: jsQR + HTML5-QRCode -->
-  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
-  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <!-- Motores de Leitura QR Code locais com fallback de CDN -->
+  <script src="libs/jsQR.js"></script>
+  <script src="libs/zxing.min.js"></script>
+  <script>
+    if (typeof jsQR === 'undefined') {
+      document.write('<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"><\/script>');
+    }
+    if (typeof ZXing === 'undefined') {
+      document.write('<script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"><\/script>');
+    }
+  </script>
 </head>
 <body>
   <div class="app-container">

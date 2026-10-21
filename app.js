@@ -129,313 +129,438 @@ function showToast(message, type = 'success') {
   }, 3500);
 }
 
-// --- Motores de Decodificação Avançada (jsQR com suporte a Latin-1 e BarcodeDetector) ---
-function decodeQrCodeFromImageData(imageData, width, height) {
+// =====================================================================
+// MOTOR DE LEITURA PRÓPRIO (substitui o html5-qrcode)
+// - Câmera em alta resolução via getUserMedia
+// - Decodifica recortes do frame NATIVO (não o tamanho da tela)
+// - 3 motores: BarcodeDetector (ML Kit do Android) + jsQR + ZXing
+// - Suporte a etiquetas gravadas em Latin-1 (ex.: "Nrº" = byte 0xBA)
+// =====================================================================
+
+// Converte bytes crus do QR em texto: tenta UTF-8 e, se inválido, Latin-1
+function bytesToText(bytes) {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(u8);
+  } catch (e) {}
+  try {
+    return new TextDecoder('iso-8859-1').decode(u8);
+  } catch (e) {}
+  let s = '';
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return s;
+}
+
+// jsQR: muito tolerante a QR pequenos. Quando o texto vem vazio (bytes Latin-1),
+// usa os bytes crus (binaryData) para reconstruir o texto.
+function decodeWithJsQR(imageData, width, height, tryInverted = false) {
   if (typeof jsQR === 'undefined') return null;
   try {
     const code = jsQR(imageData.data, width, height, {
-      inversionAttempts: "attemptBoth"
+      inversionAttempts: tryInverted ? 'attemptBoth' : 'dontInvert'
     });
     if (!code) return null;
-
-    if (code.data && code.data.trim().length > 0) {
-      return code.data;
-    }
-
-    // Fallback para Latin-1 / ISO-8859-1 (usado em etiquetas de patrimônio com "Nrº" ou acentos)
+    if (code.data && code.data.trim().length > 0) return code.data;
     if (code.binaryData && code.binaryData.length > 0) {
-      try {
-        const utf8 = new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(code.binaryData));
-        if (utf8 && utf8.trim().length > 0) return utf8;
-      } catch (e) {}
-
-      try {
-        const latin1 = new TextDecoder('iso-8859-1').decode(new Uint8Array(code.binaryData));
-        if (latin1 && latin1.trim().length > 0) return latin1;
-      } catch (e) {}
-
-      return String.fromCharCode.apply(null, code.binaryData);
+      const text = bytesToText(code.binaryData);
+      if (text && text.trim().length > 0) return text;
     }
   } catch (err) {
-    console.warn("Erro no jsQR:", err);
+    console.warn('Erro no jsQR:', err);
   }
   return null;
 }
 
-// Detecção nativa por aceleração de hardware (Google Play Services / GPU do Android - Xiaomi)
-let isHardwareDetecting = false;
-let hardwareScanTimer = null;
+// Mantido por compatibilidade com o restante do código
+function decodeQrCodeFromImageData(imageData, width, height) {
+  return decodeWithJsQR(imageData, width, height, true);
+}
 
-function startLiveHardwareScan() {
-  stopLiveHardwareScan();
-  if (!('BarcodeDetector' in window)) return;
-
-  let detector = null;
+// ZXing: tenta GlobalHistogramBinarizer (essencial para etiquetas de patrimônio) e HybridBinarizer
+const zxingEngine = { reader: null, hints: null };
+function decodeWithZXing(imageData, width, height) {
+  if (typeof ZXing === 'undefined') return null;
   try {
-    detector = new BarcodeDetector({ formats: ['qr_code'] });
-  } catch (e) {
-    try {
-      detector = new BarcodeDetector();
-    } catch (e2) {
-      return;
+    if (!zxingEngine.reader) {
+      zxingEngine.reader = new ZXing.QRCodeReader();
+      const hints = new Map();
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]);
+      zxingEngine.hints = hints;
     }
+    const d = imageData.data;
+    const n = width * height;
+    const lum = new Uint8ClampedArray(n);
+    for (let i = 0, j = 0; i < n; i++, j += 4) {
+      lum[i] = (d[j] + 2 * d[j + 1] + d[j + 2]) >> 2;
+    }
+    const source = new ZXing.RGBLuminanceSource(lum, width, height);
+
+    // 1. GlobalHistogramBinarizer: detecta etiquetas de patrimônio perfeitamente
+    if (typeof ZXing.GlobalHistogramBinarizer !== 'undefined') {
+      try {
+        const bitmapGlobal = new ZXing.BinaryBitmap(new ZXing.GlobalHistogramBinarizer(source));
+        const res = zxingEngine.reader.decode(bitmapGlobal, zxingEngine.hints);
+        const text = res && res.getText();
+        if (text && text.trim().length > 0) return text;
+      } catch (e) {}
+    }
+
+    // 2. Fallback para HybridBinarizer
+    try {
+      const bitmapHybrid = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(source));
+      const res = zxingEngine.reader.decode(bitmapHybrid, zxingEngine.hints);
+      const text = res && res.getText();
+      if (text && text.trim().length > 0) return text;
+    } catch (e) {}
+
+    return null;
+  } catch (e) {
+    return null; // NotFound / Checksum são normais enquanto procura
+  }
+}
+
+// Resultado do BarcodeDetector é aceito apenas se não vier corrompido
+function isValidDetectorText(text) {
+  return !!text && text.trim().length > 0 && !text.includes('\uFFFD');
+}
+
+// Estado interno da câmera
+const cam = {
+  stream: null,
+  track: null,
+  video: null,
+  canvas: null,
+  ctx: null,
+  loopTimer: null,
+  frame: 0,
+  detector: null,
+  digitalZoom: 1,     // usado quando o aparelho não expõe zoom por hardware
+  hardwareZoom: false
+};
+
+function getWorkCanvas() {
+  if (!cam.canvas) {
+    cam.canvas = document.createElement('canvas');
+    cam.ctx = cam.canvas.getContext('2d', { willReadFrequently: true });
+  }
+  return cam.ctx;
+}
+
+// Lê um frame da câmera com varredura completa da etiqueta (sem cortar QR code na borda esquerda)
+async function scanCurrentFrame() {
+  const v = cam.video;
+  if (!v || v.readyState < 2 || !v.videoWidth) return null;
+
+  const vw = v.videoWidth;
+  const vh = v.videoHeight;
+  cam.frame++;
+
+  // 1) BarcodeDetector nativo (ML Kit / Google Play Services) no frame inteiro
+  if (cam.detector) {
+    try {
+      const codes = await cam.detector.detect(v);
+      for (const c of codes) {
+        if (isValidDetectorText(c.rawValue)) return c.rawValue;
+      }
+    } catch (e) {}
   }
 
-  // Roda diretamente na GPU / Google Play Services ML Kit do Android (Xiaomi) sem travamento da thread JS
-  hardwareScanTimer = setInterval(async () => {
-    if (!state.isScanning || isHardwareDetecting) return;
-    const video = document.querySelector('#qr-reader video');
-    if (!video || video.readyState < 2 || video.videoWidth === 0) return;
+  // 2) jsQR + ZXing em resolução otimizada (~640px)
+  // Em etiquetas retangulares de patrimônio, o QR code fica no canto esquerdo.
+  // Alternamos entre quadro completo e foco no terço esquerdo/centro para máxima rapidez.
+  const step = cam.frame % 3;
+  let sx = 0, sy = 0, sw = vw, sh = vh;
 
-    isHardwareDetecting = true;
+  if (step === 1 && (!cam.hardwareZoom || cam.digitalZoom > 1)) {
+    // Foco ampliado na metade esquerda/central (onde o QR code da etiqueta costuma ficar)
+    sw = Math.round(vw * 0.7);
+    sh = Math.round(vh * 0.7);
+    sx = Math.round(vw * 0.05); // inicia próximo à borda esquerda
+    sy = Math.round((vh - sh) / 2);
+  } else if (step === 2 && (!cam.hardwareZoom || cam.digitalZoom > 1)) {
+    // Foco central aproximado
+    sw = Math.round(vw * 0.6);
+    sh = Math.round(vh * 0.6);
+    sx = Math.round((vw - sw) / 2);
+    sy = Math.round((vh - sh) / 2);
+  }
+
+  const TARGET_WIDTH = 640;
+  const scale = TARGET_WIDTH / sw;
+  const cw = TARGET_WIDTH;
+  const ch = Math.max(1, Math.round(sh * scale));
+
+  const ctx = getWorkCanvas();
+  if (cam.canvas.width !== cw || cam.canvas.height !== ch) {
+    cam.canvas.width = cw;
+    cam.canvas.height = ch;
+  }
+  ctx.drawImage(v, sx, sy, sw, sh, 0, 0, cw, ch);
+  const img = ctx.getImageData(0, 0, cw, ch);
+
+  // 1º Tenta jsQR com suporte a Latin-1 ("Nrº BMP") e inversão (~35ms)
+  let text = decodeWithJsQR(img, cw, ch, true);
+
+  // 2º Se não achou, tenta ZXing com GlobalHistogramBinarizer (~45ms)
+  if (!text) {
+    text = decodeWithZXing(img, cw, ch);
+  }
+
+  return text;
+}
+
+function startScanLoop() {
+  stopScanLoop();
+  cam.frame = 0;
+  cam.detector = null;
+  if ('BarcodeDetector' in window) {
     try {
-      const barcodes = await detector.detect(video);
-      if (barcodes && barcodes.length > 0) {
-        for (const b of barcodes) {
-          if (b.rawValue && b.rawValue.trim().length > 0) {
-            onScanSuccess(b.rawValue, { source: 'BarcodeDetector' });
-            break;
-          }
-        }
-      }
+      cam.detector = new BarcodeDetector({ formats: ['qr_code'] });
     } catch (e) {
-      // Ignora falhas transitórias de captura de frame
-    } finally {
-      isHardwareDetecting = false;
+      cam.detector = null;
     }
-  }, 140);
-}
-
-function stopLiveHardwareScan() {
-  if (hardwareScanTimer) {
-    clearInterval(hardwareScanTimer);
-    hardwareScanTimer = null;
   }
-  isHardwareDetecting = false;
+
+  const tick = async () => {
+    if (!state.isScanning) return;
+    const t0 = performance.now();
+    try {
+      const text = await scanCurrentFrame();
+      if (text) onScanSuccess(text, { source: 'Camera' });
+    } catch (e) {
+      console.warn('Falha no frame:', e);
+    }
+    // Pausa proporcional ao custo do frame: a interface nunca congela
+    const elapsed = performance.now() - t0;
+    if (state.isScanning) {
+      cam.loopTimer = setTimeout(tick, Math.max(50, Math.round(elapsed * 0.6)));
+    }
+  };
+  cam.loopTimer = setTimeout(tick, 250);
 }
 
-// Configuração de Autofoco Contínuo, Resolução Alta e Zoom Óptico/Digital
+function stopScanLoop() {
+  if (cam.loopTimer) {
+    clearTimeout(cam.loopTimer);
+    cam.loopTimer = null;
+  }
+}
+
+// Abre a câmera pedindo a maior resolução possível, com fallbacks
+async function openCameraStream(facing) {
+  const attempts = [
+    { audio: false, video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 } } },
+    { audio: false, video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } } },
+    { audio: false, video: { facingMode: facing } },
+    { audio: false, video: true }
+  ];
+  let lastErr = null;
+  for (const constraints of attempts) {
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (e) {
+      lastErr = e;
+      if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) break;
+    }
+  }
+  throw lastErr;
+}
+
+// Configuração de Autofoco Contínuo e Zoom (hardware ou digital)
 async function setupCameraFocusAndZoom() {
-  const video = document.querySelector('#qr-reader video');
-  if (!video || !video.srcObject) return;
+  const track = cam.track;
+  if (!track) return;
 
+  let capabilities = {};
   try {
-    const track = video.srcObject.getVideoTracks()[0];
-    if (!track) return;
+    capabilities = track.getCapabilities ? track.getCapabilities() : {};
+  } catch (e) {}
 
-    state.cameraTrack = track;
-    const capabilities = track.getCapabilities ? track.getCapabilities() : {};
-
-    // 1. Ativa Foco Contínuo para leitura nítida de etiquetas de papel
-    if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
-      await track.applyConstraints({
-        advanced: [{ focusMode: 'continuous' }]
-      }).catch(() => {});
-    }
-
-    // 2. Tenta resolução Full HD (1080p) se o sensor suportar
-    if (capabilities.width && capabilities.width.max >= 1920) {
-      await track.applyConstraints({
-        width: { ideal: 1920 },
-        height: { ideal: 1080 }
-      }).catch(() => {});
-    }
-
-    // 3. Zoom Óptico/Digital do Aparelho (Redmi Note 9 Pro e outros celulares modernos)
-    if (capabilities.zoom) {
-      if (elements.zoomControls) {
-        elements.zoomControls.style.display = 'flex';
-        const maxZoom = capabilities.zoom.max || 3.0;
-        document.querySelectorAll('.btn-zoom').forEach(btn => {
-          const zVal = parseFloat(btn.dataset.zoom);
-          btn.style.display = (zVal <= maxZoom) ? 'inline-block' : 'none';
-        });
-      }
-    } else {
-      if (elements.zoomControls) elements.zoomControls.style.display = 'none';
-    }
-  } catch (e) {
-    console.warn("Foco/Zoom avançado não configurado:", e);
+  // Foco contínuo: essencial para etiquetas de papel
+  if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
+    await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
   }
+
+  cam.hardwareZoom = !!(capabilities.zoom && capabilities.zoom.max > 1);
+  const maxZoom = cam.hardwareZoom ? capabilities.zoom.max : 3;
+
+  if (elements.zoomControls) {
+    elements.zoomControls.style.display = 'flex';
+    document.querySelectorAll('.btn-zoom').forEach(btn => {
+      const zVal = parseFloat(btn.dataset.zoom);
+      btn.style.display = (zVal <= maxZoom) ? 'inline-block' : 'none';
+      btn.classList.toggle('active', zVal === 1);
+    });
+  }
+  cam.digitalZoom = 1;
+  if (cam.video) cam.video.style.transform = '';
 }
 
 async function setZoom(zoomLevel) {
-  if (!state.cameraTrack) return;
+  if (!cam.track) return;
   try {
-    await state.cameraTrack.applyConstraints({
-      advanced: [{ zoom: zoomLevel }]
-    });
+    if (cam.hardwareZoom) {
+      await cam.track.applyConstraints({ advanced: [{ zoom: zoomLevel }] });
+    } else {
+      // Zoom digital: amplia a imagem na tela e recorta o centro do frame nativo na leitura
+      cam.digitalZoom = zoomLevel;
+      if (cam.video) cam.video.style.transform = zoomLevel > 1 ? `scale(${zoomLevel})` : '';
+    }
     document.querySelectorAll('.btn-zoom').forEach(b => {
       b.classList.toggle('active', parseFloat(b.dataset.zoom) === zoomLevel);
     });
   } catch (e) {
-    console.warn("Erro ao aplicar zoom:", e);
+    // Se o hardware recusar, cai para zoom digital
+    cam.hardwareZoom = false;
+    cam.digitalZoom = zoomLevel;
+    if (cam.video) cam.video.style.transform = zoomLevel > 1 ? `scale(${zoomLevel})` : '';
   }
 }
 
 // Processamento robusto de arquivos de imagem/foto da galeria
 async function scanImageFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onload = async () => {
-        try {
-          const canvas = document.createElement('canvas');
-          const w = img.naturalWidth || img.width;
-          const h = img.naturalHeight || img.height;
-          canvas.width = w;
-          canvas.height = h;
-          const ctx = canvas.getContext('2d', { willReadFrequently: true });
-          ctx.drawImage(img, 0, 0);
-
-          // 1. Tenta BarcodeDetector nativo
-          if ('BarcodeDetector' in window) {
-            try {
-              const detector = new BarcodeDetector({ formats: ['qr_code'] });
-              const barcodes = await detector.detect(canvas);
-              if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
-                return resolve(barcodes[0].rawValue);
-              }
-            } catch (err) {}
-          }
-
-          // 2. Tenta jsQR em resolução original (com suporte a Latin-1 e inversão)
-          const imgData = ctx.getImageData(0, 0, w, h);
-          const text = decodeQrCodeFromImageData(imgData, w, h);
-          if (text) {
-            return resolve(text);
-          }
-
-          // 3. Fallback: se a foto for grande, tenta em escala 50%
-          if (w > 1200 || h > 1200) {
-            const c2 = document.createElement('canvas');
-            c2.width = Math.floor(w / 2);
-            c2.height = Math.floor(h / 2);
-            const ctx2 = c2.getContext('2d');
-            ctx2.drawImage(canvas, 0, 0, c2.width, c2.height);
-            const imgData2 = ctx2.getImageData(0, 0, c2.width, c2.height);
-            const text2 = decodeQrCodeFromImageData(imgData2, c2.width, c2.height);
-            if (text2) {
-              return resolve(text2);
-            }
-          }
-
-          reject(new Error("Nenhum QR Code legível encontrado na foto."));
-        } catch (err) {
-          reject(err);
-        }
-      };
-      img.onerror = () => reject(new Error("Erro ao abrir a imagem."));
-      img.src = e.target.result;
-    };
-    reader.onerror = () => reject(new Error("Erro ao ler o arquivo."));
-    reader.readAsDataURL(file);
+  const img = await new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const im = new Image();
+    im.onload = () => { URL.revokeObjectURL(url); resolve(im); };
+    im.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Erro ao abrir a imagem.')); };
+    im.src = url;
   });
+
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+
+  // 1. BarcodeDetector nativo
+  if ('BarcodeDetector' in window) {
+    try {
+      const detector = new BarcodeDetector({ formats: ['qr_code'] });
+      const codes = await detector.detect(img);
+      for (const c of codes) {
+        if (isValidDetectorText(c.rawValue)) return c.rawValue;
+      }
+    } catch (e) {}
+  }
+
+  // 2. jsQR + ZXing em várias escalas (fotos de celular são grandes demais)
+  const maxSide = Math.max(w, h);
+  const targets = [800, 640, 1200, 480, maxSide];
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  for (const target of targets) {
+    const scale = Math.min(1, target / maxSide);
+    const cw = Math.round(w * scale);
+    const ch = Math.round(h * scale);
+    canvas.width = cw;
+    canvas.height = ch;
+    ctx.drawImage(img, 0, 0, cw, ch);
+    const data = ctx.getImageData(0, 0, cw, ch);
+    const text = decodeWithJsQR(data, cw, ch, true) || decodeWithZXing(data, cw, ch);
+    if (text) return text;
+    await new Promise(r => setTimeout(r, 0)); // deixa a interface respirar
+  }
+
+  throw new Error('Nenhum QR Code legível encontrado na foto.');
 }
 
 // Inicializar e Controlar Câmera
-function createScannerInstance() {
-  try {
-    return new Html5Qrcode("qr-reader", {
-      experimentalFeatures: {
-        useBarCodeDetectorIfSupported: true
-      },
-      verbose: false
-    });
-  } catch (e) {
-    return new Html5Qrcode("qr-reader");
-  }
-}
-
 async function initScanner() {
-  state.html5QrCode = createScannerInstance();
-  // Tentar iniciar automaticamente se permitido
   startCamera();
 }
 
 async function startCamera() {
   if (state.isScanning) return;
 
-  // Sem qrbox limitante: varre o visor inteiro, permitindo enquadrar QR codes em qualquer canto da etiqueta
-  const config = {
-    fps: 15,
-    aspectRatio: 1.333333
-  };
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showToast('Este navegador não libera a câmera. Acesse via HTTPS no Chrome.', 'error');
+    return;
+  }
 
   try {
     elements.cameraPlaceholder.style.display = 'none';
     elements.laser.classList.add('active');
 
-    // Garante que a instância esteja pronta
-    if (!state.html5QrCode) {
-      state.html5QrCode = createScannerInstance();
-    }
+    cam.stream = await openCameraStream(state.currentFacingMode);
+    cam.track = cam.stream.getVideoTracks()[0];
+    state.cameraTrack = cam.track;
 
-    // Passa exatamente 1 chave no objeto ({ facingMode }), respeitando a validação interna do Html5Qrcode
-    await state.html5QrCode.start(
-      { facingMode: state.currentFacingMode },
-      config,
-      onScanSuccess,
-      onScanFailure
-    );
+    if (!cam.video) {
+      cam.video = document.createElement('video');
+      cam.video.setAttribute('playsinline', '');
+      cam.video.setAttribute('autoplay', '');
+      cam.video.muted = true;
+      elements.qrReaderContainer.innerHTML = '';
+      elements.qrReaderContainer.appendChild(cam.video);
+    }
+    cam.video.srcObject = cam.stream;
+    await cam.video.play();
 
     state.isScanning = true;
-    startLiveHardwareScan();
     elements.btnToggleCamera.innerHTML = '<span class="btn-icon">⏹</span> Pausar';
 
-    // Ativa foco contínuo e habilita controles de Zoom do aparelho
-    setTimeout(setupCameraFocusAndZoom, 600);
+    await setupCameraFocusAndZoom();
+    startScanLoop();
+
+    const s = cam.track.getSettings ? cam.track.getSettings() : {};
+    console.log('Câmera ativa:', s.width + 'x' + s.height, '| BarcodeDetector:', !!cam.detector);
   } catch (err) {
-    console.error("Erro ao iniciar câmera:", err);
+    console.error('Erro ao iniciar câmera:', err);
+    releaseCamera();
     elements.laser.classList.remove('active');
     elements.cameraPlaceholder.style.display = 'flex';
     state.isScanning = false;
-    stopLiveHardwareScan();
     elements.btnToggleCamera.innerHTML = '<span class="btn-icon">▶️</span> Iniciar';
 
-    // Recria a instância limpa para que o próximo clique em "Ativar Câmera" não falhe por transição travada
-    try {
-      state.html5QrCode = createScannerInstance();
-    } catch (e) {}
-
-    let errorMsg = "Não foi possível abrir a câmera.";
-    const errStr = (err && (err.message || err.toString())) || "";
-    if (errStr.includes("NotAllowedError") || errStr.includes("Permission") || errStr.includes("denied")) {
-      errorMsg = "Permissão da câmera negada. Permita o acesso à câmera nas configurações do navegador (ícone de cadeado na barra de endereço).";
-    } else if (errStr.includes("NotFoundError") || errStr.includes("device not found")) {
-      errorMsg = "Nenhuma câmera encontrada no aparelho.";
-    } else if (errStr.includes("NotReadableError") || errStr.includes("in use")) {
-      errorMsg = "A câmera já está sendo usada por outro app.";
+    let errorMsg = 'Não foi possível abrir a câmera.';
+    const errName = (err && err.name) || '';
+    const errStr = (err && (err.message || err.toString())) || '';
+    if (errName === 'NotAllowedError' || errStr.includes('Permission') || errStr.includes('denied')) {
+      errorMsg = 'Permissão da câmera negada. Permita o acesso à câmera nas configurações do navegador (ícone de cadeado na barra de endereço).';
+    } else if (errName === 'NotFoundError') {
+      errorMsg = 'Nenhuma câmera encontrada no aparelho.';
+    } else if (errName === 'NotReadableError') {
+      errorMsg = 'A câmera já está sendo usada por outro app.';
     } else if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-      errorMsg = "O navegador bloqueia a câmera fora de HTTPS. No celular, acesse via HTTPS ou configure o Chrome com flags de localhost.";
+      errorMsg = 'O navegador bloqueia a câmera fora de HTTPS. No celular, acesse via HTTPS.';
     } else {
-      errorMsg = "Erro na câmera: " + errStr;
+      errorMsg = 'Erro na câmera: ' + errStr;
     }
     showToast(errorMsg, 'error');
   }
 }
 
-async function stopCamera() {
-  stopLiveHardwareScan();
-  if (elements.zoomControls) elements.zoomControls.style.display = 'none';
-  if (!state.isScanning) return;
-  try {
-    await state.html5QrCode.stop();
-    state.isScanning = false;
-    elements.laser.classList.remove('active');
-    elements.cameraPlaceholder.style.display = 'flex';
-    elements.btnToggleCamera.innerHTML = '<span class="btn-icon">▶️</span> Iniciar';
-  } catch (err) {
-    console.error("Erro ao parar câmera:", err);
+function releaseCamera() {
+  stopScanLoop();
+  if (cam.stream) {
+    cam.stream.getTracks().forEach(t => t.stop());
   }
+  cam.stream = null;
+  cam.track = null;
+  state.cameraTrack = null;
+  state.torchEnabled = false;
+  if (cam.video) {
+    cam.video.srcObject = null;
+    cam.video.style.transform = '';
+  }
+  if (elements.btnToggleTorch) elements.btnToggleTorch.classList.remove('active');
+}
+
+async function stopCamera() {
+  releaseCamera();
+  if (elements.zoomControls) elements.zoomControls.style.display = 'none';
+  state.isScanning = false;
+  elements.laser.classList.remove('active');
+  elements.cameraPlaceholder.style.display = 'flex';
+  elements.btnToggleCamera.innerHTML = '<span class="btn-icon">▶️</span> Iniciar';
 }
 
 async function switchCamera() {
   await stopCamera();
-  state.currentFacingMode = (state.currentFacingMode === "environment") ? "user" : "environment";
+  state.currentFacingMode = (state.currentFacingMode === 'environment') ? 'user' : 'environment';
   await startCamera();
 }
+
 
 // Callback de Sucesso da Leitura
 function onScanSuccess(decodedText, decodedResult) {
@@ -855,19 +980,15 @@ function setupEventListeners() {
           showToast('Inicie a câmera primeiro', 'warning');
           return;
         }
+        if (!state.cameraTrack) return;
         state.torchEnabled = !state.torchEnabled;
-        if (state.cameraTrack) {
-          await state.cameraTrack.applyConstraints({
-            advanced: [{ torch: state.torchEnabled }]
-          });
-        } else if (state.html5QrCode) {
-          await state.html5QrCode.applyVideoConstraints({
-            advanced: [{ torch: state.torchEnabled }]
-          });
-        }
+        await state.cameraTrack.applyConstraints({
+          advanced: [{ torch: state.torchEnabled }]
+        });
         showToast(`Lanterna ${state.torchEnabled ? 'ligada' : 'desligada'}`);
         elements.btnToggleTorch.classList.toggle('active', state.torchEnabled);
       } catch (e) {
+        state.torchEnabled = false;
         showToast('Lanterna não suportada neste aparelho', 'warning');
       }
     });
