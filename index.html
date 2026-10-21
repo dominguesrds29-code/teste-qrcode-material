@@ -81,6 +81,19 @@
           </button>
           <input type="file" id="file-input" accept="image/*" style="display: none;">
         </div>
+
+        <!-- Zoom Controls (para aproximar etiquetas com QR Codes pequenos) -->
+        <div id="zoom-controls" class="zoom-controls" style="display: none;">
+          <span class="zoom-label">🔍 Zoom:</span>
+          <button type="button" class="btn-zoom active" data-zoom="1">1x</button>
+          <button type="button" class="btn-zoom" data-zoom="1.5">1.5x</button>
+          <button type="button" class="btn-zoom" data-zoom="2">2x</button>
+          <button type="button" class="btn-zoom" data-zoom="2.5">2.5x</button>
+        </div>
+
+        <div class="camera-tip">
+          💡 Para etiquetas de patrimônio: use <b>Zoom 2x</b> a ~25cm ou envie uma <b>Foto/Galeria</b>.
+        </div>
       </div>
 
       <!-- Quick Manual Entry Fallback -->

@@ -280,6 +280,66 @@ body {
   display: flex;
   gap: 8px;
   justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* Zoom Controls */
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 6px 14px;
+  background: rgba(15, 23, 42, 0.75);
+  border-radius: 24px;
+  border: 1px solid var(--border-color);
+  width: fit-content;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.zoom-label {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.btn-zoom {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  font-size: 0.76rem;
+  font-weight: 700;
+  padding: 5px 12px;
+  border-radius: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  min-width: 38px;
+}
+
+.btn-zoom:hover, .btn-zoom.active {
+  background: var(--accent-primary);
+  color: #fff;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.35);
+}
+
+.camera-tip {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  text-align: center;
+  margin-top: 8px;
+  background: rgba(36, 50, 77, 0.3);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-color);
+  line-height: 1.4;
+}
+
+.camera-tip b {
+  color: #34d399;
 }
 
 /* Buttons */

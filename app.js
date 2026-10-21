@@ -36,6 +36,7 @@ const elements = {
   btnToggleTorch: document.getElementById('btn-toggle-torch'),
   btnUploadFile: document.getElementById('btn-upload-file'),
   fileInput: document.getElementById('file-input'),
+  zoomControls: document.getElementById('zoom-controls'),
   
   inputBatch: document.getElementById('input-batch'),
   inputOperator: document.getElementById('input-operator'),
@@ -161,64 +162,118 @@ function decodeQrCodeFromImageData(imageData, width, height) {
   return null;
 }
 
-// Varredura contínua em resolução nativa do sensor de vídeo
-let liveScanTimer = null;
-const liveCanvas = document.createElement('canvas');
-const liveCtx = liveCanvas.getContext('2d', { willReadFrequently: true });
+// Detecção nativa por aceleração de hardware (Google Play Services / GPU do Android - Xiaomi)
+let isHardwareDetecting = false;
+let hardwareScanTimer = null;
 
-function startLiveSecondaryScan() {
-  stopLiveSecondaryScan();
+function startLiveHardwareScan() {
+  stopLiveHardwareScan();
+  if (!('BarcodeDetector' in window)) return;
 
-  let nativeDetector = null;
-  if ('BarcodeDetector' in window) {
+  let detector = null;
+  try {
+    detector = new BarcodeDetector({ formats: ['qr_code'] });
+  } catch (e) {
     try {
-      nativeDetector = new BarcodeDetector({ formats: ['qr_code'] });
-    } catch (e) {}
+      detector = new BarcodeDetector();
+    } catch (e2) {
+      return;
+    }
   }
 
-  liveScanTimer = setInterval(async () => {
-    if (!state.isScanning) return;
+  // Roda diretamente na GPU / Google Play Services ML Kit do Android (Xiaomi) sem travamento da thread JS
+  hardwareScanTimer = setInterval(async () => {
+    if (!state.isScanning || isHardwareDetecting) return;
     const video = document.querySelector('#qr-reader video');
     if (!video || video.readyState < 2 || video.videoWidth === 0) return;
 
+    isHardwareDetecting = true;
     try {
-      // 1. Tenta detecção por hardware nativo (Google Play Services / GPU) no elemento de vídeo
-      if (nativeDetector) {
-        const barcodes = await nativeDetector.detect(video);
-        if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
-          onScanSuccess(barcodes[0].rawValue, { source: 'BarcodeDetector' });
-          return;
+      const barcodes = await detector.detect(video);
+      if (barcodes && barcodes.length > 0) {
+        for (const b of barcodes) {
+          if (b.rawValue && b.rawValue.trim().length > 0) {
+            onScanSuccess(b.rawValue, { source: 'BarcodeDetector' });
+            break;
+          }
         }
       }
-
-      // 2. Tenta jsQR com o frame em resolução real
-      if (typeof jsQR !== 'undefined') {
-        const vW = video.videoWidth;
-        const vH = video.videoHeight;
-        if (liveCanvas.width !== vW || liveCanvas.height !== vH) {
-          liveCanvas.width = vW;
-          liveCanvas.height = vH;
-        }
-        liveCtx.drawImage(video, 0, 0, vW, vH);
-        const imgData = liveCtx.getImageData(0, 0, vW, vH);
-        const text = decodeQrCodeFromImageData(imgData, vW, vH);
-        if (text) {
-          onScanSuccess(text, { source: 'jsQR' });
-          return;
-        }
-      }
-    } catch (e) {}
-  }, 200);
+    } catch (e) {
+      // Ignora falhas transitórias de captura de frame
+    } finally {
+      isHardwareDetecting = false;
+    }
+  }, 140);
 }
 
-function stopLiveSecondaryScan() {
-  if (liveScanTimer) {
-    clearInterval(liveScanTimer);
-    liveScanTimer = null;
+function stopLiveHardwareScan() {
+  if (hardwareScanTimer) {
+    clearInterval(hardwareScanTimer);
+    hardwareScanTimer = null;
+  }
+  isHardwareDetecting = false;
+}
+
+// Configuração de Autofoco Contínuo, Resolução Alta e Zoom Óptico/Digital
+async function setupCameraFocusAndZoom() {
+  const video = document.querySelector('#qr-reader video');
+  if (!video || !video.srcObject) return;
+
+  try {
+    const track = video.srcObject.getVideoTracks()[0];
+    if (!track) return;
+
+    state.cameraTrack = track;
+    const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+
+    // 1. Ativa Foco Contínuo para leitura nítida de etiquetas de papel
+    if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
+      await track.applyConstraints({
+        advanced: [{ focusMode: 'continuous' }]
+      }).catch(() => {});
+    }
+
+    // 2. Tenta resolução Full HD (1080p) se o sensor suportar
+    if (capabilities.width && capabilities.width.max >= 1920) {
+      await track.applyConstraints({
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      }).catch(() => {});
+    }
+
+    // 3. Zoom Óptico/Digital do Aparelho (Redmi Note 9 Pro e outros celulares modernos)
+    if (capabilities.zoom) {
+      if (elements.zoomControls) {
+        elements.zoomControls.style.display = 'flex';
+        const maxZoom = capabilities.zoom.max || 3.0;
+        document.querySelectorAll('.btn-zoom').forEach(btn => {
+          const zVal = parseFloat(btn.dataset.zoom);
+          btn.style.display = (zVal <= maxZoom) ? 'inline-block' : 'none';
+        });
+      }
+    } else {
+      if (elements.zoomControls) elements.zoomControls.style.display = 'none';
+    }
+  } catch (e) {
+    console.warn("Foco/Zoom avançado não configurado:", e);
   }
 }
 
-// Processamento robusto de arquivos de imagem/foto
+async function setZoom(zoomLevel) {
+  if (!state.cameraTrack) return;
+  try {
+    await state.cameraTrack.applyConstraints({
+      advanced: [{ zoom: zoomLevel }]
+    });
+    document.querySelectorAll('.btn-zoom').forEach(b => {
+      b.classList.toggle('active', parseFloat(b.dataset.zoom) === zoomLevel);
+    });
+  } catch (e) {
+    console.warn("Erro ao aplicar zoom:", e);
+  }
+}
+
+// Processamento robusto de arquivos de imagem/foto da galeria
 async function scanImageFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -245,7 +300,7 @@ async function scanImageFile(file) {
             } catch (err) {}
           }
 
-          // 2. Tenta jsQR em resolução original (com suporte a Latin-1)
+          // 2. Tenta jsQR em resolução original (com suporte a Latin-1 e inversão)
           const imgData = ctx.getImageData(0, 0, w, h);
           const text = decodeQrCodeFromImageData(imgData, w, h);
           if (text) {
@@ -266,16 +321,6 @@ async function scanImageFile(file) {
             }
           }
 
-          // 4. Fallback final: Html5Qrcode se disponível
-          if (state.html5QrCode) {
-            try {
-              const res = await state.html5QrCode.scanFileV2(file, false);
-              if (res && res.decodedText) {
-                return resolve(res.decodedText);
-              }
-            } catch (h5Err) {}
-          }
-
           reject(new Error("Nenhum QR Code legível encontrado na foto."));
         } catch (err) {
           reject(err);
@@ -293,7 +338,6 @@ async function scanImageFile(file) {
 function createScannerInstance() {
   try {
     return new Html5Qrcode("qr-reader", {
-      formatsToSupport: [0], // 0 = QR_CODE apenas, sem gastar CPU com códigos 1D
       experimentalFeatures: {
         useBarCodeDetectorIfSupported: true
       },
@@ -313,14 +357,9 @@ async function initScanner() {
 async function startCamera() {
   if (state.isScanning) return;
 
+  // Sem qrbox limitante: varre o visor inteiro, permitindo enquadrar QR codes em qualquer canto da etiqueta
   const config = {
     fps: 15,
-    // qrbox amplo e dinâmico: evita cortar QR Codes que ficam nas extremidades de etiquetas retangulares
-    qrbox: function(viewfinderWidth, viewfinderHeight) {
-      const width = Math.max(250, Math.floor(viewfinderWidth * 0.88));
-      const height = Math.max(220, Math.floor(viewfinderHeight * 0.75));
-      return { width, height };
-    },
     aspectRatio: 1.333333
   };
 
@@ -342,14 +381,17 @@ async function startCamera() {
     );
 
     state.isScanning = true;
-    startLiveSecondaryScan();
+    startLiveHardwareScan();
     elements.btnToggleCamera.innerHTML = '<span class="btn-icon">⏹</span> Pausar';
+
+    // Ativa foco contínuo e habilita controles de Zoom do aparelho
+    setTimeout(setupCameraFocusAndZoom, 600);
   } catch (err) {
     console.error("Erro ao iniciar câmera:", err);
     elements.laser.classList.remove('active');
     elements.cameraPlaceholder.style.display = 'flex';
     state.isScanning = false;
-    stopLiveSecondaryScan();
+    stopLiveHardwareScan();
     elements.btnToggleCamera.innerHTML = '<span class="btn-icon">▶️</span> Iniciar';
 
     // Recria a instância limpa para que o próximo clique em "Ativar Câmera" não falhe por transição travada
@@ -375,7 +417,8 @@ async function startCamera() {
 }
 
 async function stopCamera() {
-  stopLiveSecondaryScan();
+  stopLiveHardwareScan();
+  if (elements.zoomControls) elements.zoomControls.style.display = 'none';
   if (!state.isScanning) return;
   try {
     await state.html5QrCode.stop();
@@ -804,6 +847,40 @@ function setupEventListeners() {
   });
   elements.btnSwitchCamera.addEventListener('click', switchCamera);
   
+  // Lanterna (Torch) se a câmera suportar
+  if (elements.btnToggleTorch) {
+    elements.btnToggleTorch.addEventListener('click', async () => {
+      try {
+        if (!state.isScanning) {
+          showToast('Inicie a câmera primeiro', 'warning');
+          return;
+        }
+        state.torchEnabled = !state.torchEnabled;
+        if (state.cameraTrack) {
+          await state.cameraTrack.applyConstraints({
+            advanced: [{ torch: state.torchEnabled }]
+          });
+        } else if (state.html5QrCode) {
+          await state.html5QrCode.applyVideoConstraints({
+            advanced: [{ torch: state.torchEnabled }]
+          });
+        }
+        showToast(`Lanterna ${state.torchEnabled ? 'ligada' : 'desligada'}`);
+        elements.btnToggleTorch.classList.toggle('active', state.torchEnabled);
+      } catch (e) {
+        showToast('Lanterna não suportada neste aparelho', 'warning');
+      }
+    });
+  }
+
+  // Controles de Zoom da Câmera
+  document.querySelectorAll('.btn-zoom').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const z = parseFloat(e.currentTarget.dataset.zoom);
+      setZoom(z);
+    });
+  });
+
   // Upload de Imagem/Foto da Galeria
   if (elements.btnUploadFile && elements.fileInput) {
     elements.btnUploadFile.addEventListener('click', () => {
