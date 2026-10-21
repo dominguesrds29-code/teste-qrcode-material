@@ -34,6 +34,8 @@ const elements = {
   btnToggleCamera: document.getElementById('btn-toggle-camera'),
   btnSwitchCamera: document.getElementById('btn-switch-camera'),
   btnToggleTorch: document.getElementById('btn-toggle-torch'),
+  btnUploadFile: document.getElementById('btn-upload-file'),
+  fileInput: document.getElementById('file-input'),
   
   inputBatch: document.getElementById('input-batch'),
   inputOperator: document.getElementById('input-operator'),
@@ -128,7 +130,16 @@ function showToast(message, type = 'success') {
 
 // Inicializar e Controlar Câmera
 async function initScanner() {
-  state.html5QrCode = new Html5Qrcode("qr-reader");
+  try {
+    state.html5QrCode = new Html5Qrcode("qr-reader", {
+      experimentalFeatures: {
+        useBarCodeDetectorIfSupported: true
+      },
+      verbose: false
+    });
+  } catch (e) {
+    state.html5QrCode = new Html5Qrcode("qr-reader");
+  }
   
   // Tentar iniciar automaticamente se permitido
   startCamera();
@@ -139,20 +150,42 @@ async function startCamera() {
 
   const config = {
     fps: 15,
-    qrbox: { width: 250, height: 250 },
+    // qrbox amplo e dinâmico: evita cortar QR Codes que ficam nas extremidades de etiquetas retangulares
+    qrbox: function(viewfinderWidth, viewfinderHeight) {
+      const width = Math.max(250, Math.floor(viewfinderWidth * 0.88));
+      const height = Math.max(220, Math.floor(viewfinderHeight * 0.75));
+      return { width, height };
+    },
     aspectRatio: 1.333333
+  };
+
+  // Solicita resolução alta (Full HD / HD) para leitura de QR Codes densos (matriz 37x37+ com muitos caracteres)
+  const highResConstraints = {
+    facingMode: state.currentFacingMode,
+    width: { min: 640, ideal: 1920 },
+    height: { min: 480, ideal: 1080 }
   };
 
   try {
     elements.cameraPlaceholder.style.display = 'none';
     elements.laser.classList.add('active');
 
-    await state.html5QrCode.start(
-      { facingMode: state.currentFacingMode },
-      config,
-      onScanSuccess,
-      onScanFailure
-    );
+    try {
+      await state.html5QrCode.start(
+        highResConstraints,
+        config,
+        onScanSuccess,
+        onScanFailure
+      );
+    } catch (constraintErr) {
+      console.warn("Constraints de alta resolução não aceitas, iniciando modo padrão:", constraintErr);
+      await state.html5QrCode.start(
+        { facingMode: state.currentFacingMode },
+        config,
+        onScanSuccess,
+        onScanFailure
+      );
+    }
 
     state.isScanning = true;
     elements.btnToggleCamera.innerHTML = '<span class="btn-icon">⏹</span> Pausar';
@@ -327,6 +360,41 @@ function saveItemsToStorage() {
   localStorage.setItem('cargascan_items', JSON.stringify(state.items));
 }
 
+// Formatador inteligente para etiquetas patrimoniais e textos multilinha
+function formatItemDisplay(description) {
+  if (!description) return { primary: 'Sem descrição', secondary: '' };
+  
+  const lines = description.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length <= 1) {
+    return { primary: description, secondary: '' };
+  }
+
+  let bmp = '';
+  let ug = '';
+  let equip = '';
+  const others = [];
+
+  for (const line of lines) {
+    if (/^Nr[ºo°]?\s*BMP/i.test(line) || /^BMP/i.test(line)) {
+      bmp = line;
+    } else if (/^UG:/i.test(line) || /^Depend/i.test(line)) {
+      ug = ug ? `${ug} | ${line}` : line;
+    } else if (!equip && /MONITOR|DATEN|LED|NOTEBOOK|CPU|COMPUTADOR|TECLADO|IMPRESSORA|DELL|HP|LENOVO|CADEIRA|MESA/i.test(line)) {
+      equip = line;
+    } else {
+      others.push(line);
+    }
+  }
+
+  const primary = equip || lines[lines.length - 1];
+  const tags = [];
+  if (bmp) tags.push(bmp);
+  if (ug) tags.push(ug);
+  const secondary = tags.concat(others.filter(l => l !== primary)).join(' • ');
+
+  return { primary, secondary };
+}
+
 // Atualizar Interface e Contadores
 function updateUI() {
   const total = state.items.length;
@@ -364,9 +432,12 @@ function updateUI() {
       statusClass = 'status-pending';
     }
 
+    const displayInfo = formatItemDisplay(item.description);
+
     itemEl.innerHTML = `
       <div class="item-info">
-        <span class="item-desc" title="${escapeHtml(item.description)}">${escapeHtml(item.description)}</span>
+        <span class="item-desc" title="${escapeHtml(item.description)}">${escapeHtml(displayInfo.primary)}</span>
+        ${displayInfo.secondary ? `<div class="item-sub-desc" title="${escapeHtml(displayInfo.secondary)}">${escapeHtml(displayInfo.secondary)}</div>` : ''}
         <div class="item-meta">
           <span>🕒 ${item.timestamp.split(' ')[1] || item.timestamp}</span>
           <span>🏷️ ${escapeHtml(item.batch)}</span>
@@ -562,19 +633,42 @@ function setupEventListeners() {
   });
   elements.btnSwitchCamera.addEventListener('click', switchCamera);
   
-  // Lanterna (Torch) se a câmera suportar
-  elements.btnToggleTorch.addEventListener('click', async () => {
-    try {
-      if (!state.isScanning) return;
-      state.torchEnabled = !state.torchEnabled;
-      await state.html5QrCode.applyVideoConstraints({
-        advanced: [{ torch: state.torchEnabled }]
-      });
-      showToast(`Lanterna ${state.torchEnabled ? 'ligada' : 'desligada'}`);
-    } catch (e) {
-      showToast('Lanterna não suportada neste aparelho', 'warning');
-    }
-  });
+  // Upload de Imagem/Foto da Galeria
+  if (elements.btnUploadFile && elements.fileInput) {
+    elements.btnUploadFile.addEventListener('click', () => {
+      elements.fileInput.click();
+    });
+
+    elements.fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+
+      showToast('Analisando imagem...', 'warning');
+      try {
+        const wasScanning = state.isScanning;
+        if (wasScanning) {
+          await stopCamera();
+        }
+
+        const scanResult = await state.html5QrCode.scanFileV2(file, false);
+        if (scanResult && scanResult.decodedText) {
+          onScanSuccess(scanResult.decodedText, scanResult);
+          showToast('QR Code da foto identificado!', 'success');
+        } else {
+          showToast('Nenhum código encontrado na imagem.', 'error');
+        }
+
+        if (wasScanning) {
+          setTimeout(startCamera, 1200);
+        }
+      } catch (err) {
+        console.warn("Falha ao escanear imagem:", err);
+        showToast('Não foi possível ler o QR code desta foto. Aproxime mais a câmera do quadrado.', 'error');
+      } finally {
+        elements.fileInput.value = '';
+      }
+    });
+  }
 
   // Formulário Manual
   elements.formManual.addEventListener('submit', (e) => {

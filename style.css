@@ -534,6 +534,15 @@ body {
   text-overflow: ellipsis;
 }
 
+.item-sub-desc {
+  font-size: 0.74rem;
+  color: #34d399;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .item-meta {
   font-size: 0.7rem;
   color: var(--text-muted);
