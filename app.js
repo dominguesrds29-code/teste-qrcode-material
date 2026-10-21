@@ -129,18 +129,21 @@ function showToast(message, type = 'success') {
 }
 
 // Inicializar e Controlar Câmera
-async function initScanner() {
+function createScannerInstance() {
   try {
-    state.html5QrCode = new Html5Qrcode("qr-reader", {
+    return new Html5Qrcode("qr-reader", {
       experimentalFeatures: {
         useBarCodeDetectorIfSupported: true
       },
       verbose: false
     });
   } catch (e) {
-    state.html5QrCode = new Html5Qrcode("qr-reader");
+    return new Html5Qrcode("qr-reader");
   }
-  
+}
+
+async function initScanner() {
+  state.html5QrCode = createScannerInstance();
   // Tentar iniciar automaticamente se permitido
   startCamera();
 }
@@ -159,33 +162,22 @@ async function startCamera() {
     aspectRatio: 1.333333
   };
 
-  // Solicita resolução alta (Full HD / HD) para leitura de QR Codes densos (matriz 37x37+ com muitos caracteres)
-  const highResConstraints = {
-    facingMode: state.currentFacingMode,
-    width: { min: 640, ideal: 1920 },
-    height: { min: 480, ideal: 1080 }
-  };
-
   try {
     elements.cameraPlaceholder.style.display = 'none';
     elements.laser.classList.add('active');
 
-    try {
-      await state.html5QrCode.start(
-        highResConstraints,
-        config,
-        onScanSuccess,
-        onScanFailure
-      );
-    } catch (constraintErr) {
-      console.warn("Constraints de alta resolução não aceitas, iniciando modo padrão:", constraintErr);
-      await state.html5QrCode.start(
-        { facingMode: state.currentFacingMode },
-        config,
-        onScanSuccess,
-        onScanFailure
-      );
+    // Garante que a instância esteja pronta
+    if (!state.html5QrCode) {
+      state.html5QrCode = createScannerInstance();
     }
+
+    // Passa exatamente 1 chave no objeto ({ facingMode }), respeitando a validação interna do Html5Qrcode
+    await state.html5QrCode.start(
+      { facingMode: state.currentFacingMode },
+      config,
+      onScanSuccess,
+      onScanFailure
+    );
 
     state.isScanning = true;
     elements.btnToggleCamera.innerHTML = '<span class="btn-icon">⏹</span> Pausar';
@@ -196,9 +188,23 @@ async function startCamera() {
     state.isScanning = false;
     elements.btnToggleCamera.innerHTML = '<span class="btn-icon">▶️</span> Iniciar';
 
-    let errorMsg = "Não foi possível abrir a câmera. Verifique as permissões do navegador.";
-    if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-      errorMsg = "Acesso à câmera no celular exige conexão segura (HTTPS). Acesse via HTTPS ou localhost.";
+    // Recria a instância limpa para que o próximo clique em "Ativar Câmera" não falhe por transição travada
+    try {
+      state.html5QrCode = createScannerInstance();
+    } catch (e) {}
+
+    let errorMsg = "Não foi possível abrir a câmera.";
+    const errStr = (err && (err.message || err.toString())) || "";
+    if (errStr.includes("NotAllowedError") || errStr.includes("Permission") || errStr.includes("denied")) {
+      errorMsg = "Permissão da câmera negada. Permita o acesso à câmera nas configurações do navegador (ícone de cadeado na barra de endereço).";
+    } else if (errStr.includes("NotFoundError") || errStr.includes("device not found")) {
+      errorMsg = "Nenhuma câmera encontrada no aparelho.";
+    } else if (errStr.includes("NotReadableError") || errStr.includes("in use")) {
+      errorMsg = "A câmera já está sendo usada por outro app.";
+    } else if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      errorMsg = "O navegador bloqueia a câmera fora de HTTPS. No celular, acesse via HTTPS ou configure o Chrome com flags de localhost.";
+    } else {
+      errorMsg = "Erro na câmera: " + errStr;
     }
     showToast(errorMsg, 'error');
   }
