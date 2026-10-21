@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Teste Diagnóstico QR</title>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+</head>
+<body style="font-family: sans-serif; padding: 20px;">
+  <h2>Diagnóstico de Leitura QR Code</h2>
+  <div id="qr-reader" style="width: 500px;"></div>
+  <pre id="output" style="background: #222; color: #fff; padding: 15px; border-radius: 8px;"></pre>
+
+  <script>
+    const output = document.getElementById('output');
+    function log(msg) {
+      output.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    async function runTest() {
+      try {
+        log('Carregando imagem teste_etiqueta.jpg...');
+        const resp = await fetch('teste_etiqueta.jpg');
+        const blob = await resp.blob();
+        const file = new File([blob], 'teste_etiqueta.jpg', { type: blob.type });
+
+        log('Arquivo criado: ' + file.size + ' bytes');
+        log('Testando com Html5Qrcode...');
+
+        const html5QrCode = new Html5Qrcode("qr-reader", {
+          experimentalFeatures: {
+            useBarCodeDetectorIfSupported: true
+          }
+        });
+
+        log('BarcodeDetector suportado no navegador? ' + ('BarcodeDetector' in window));
+
+        // Teste scanFileV2
+        try {
+          const res = await html5QrCode.scanFileV2(file, false);
+          log('✅ SUCESSO scanFileV2 (com BarcodeDetector se suportado):');
+          log('Texto lido: ' + JSON.stringify(res.decodedText));
+          log('Formato: ' + (res.result ? res.result.format.formatName : 'desconhecido'));
+        } catch (e1) {
+          log('❌ Falha scanFileV2: ' + e1);
+        }
+
+        // Teste sem BarcodeDetector (apenas ZXing)
+        const html5QrCodeZxing = new Html5Qrcode("qr-reader", {
+          experimentalFeatures: {
+            useBarCodeDetectorIfSupported: false
+          }
+        });
+        try {
+          const res2 = await html5QrCodeZxing.scanFileV2(file, false);
+          log('✅ SUCESSO scanFileV2 (ZXing puro):');
+          log('Texto lido: ' + JSON.stringify(res2.decodedText));
+        } catch (e2) {
+          log('❌ Falha scanFileV2 (ZXing puro): ' + e2);
+        }
+
+      } catch (err) {
+        log('Erro fatal: ' + err);
+      }
+    }
+
+    window.onload = runTest;
+  </script>
+</body>
+</html>
