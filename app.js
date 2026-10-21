@@ -128,10 +128,172 @@ function showToast(message, type = 'success') {
   }, 3500);
 }
 
+// --- Motores de Decodificação Avançada (jsQR com suporte a Latin-1 e BarcodeDetector) ---
+function decodeQrCodeFromImageData(imageData, width, height) {
+  if (typeof jsQR === 'undefined') return null;
+  try {
+    const code = jsQR(imageData.data, width, height, {
+      inversionAttempts: "attemptBoth"
+    });
+    if (!code) return null;
+
+    if (code.data && code.data.trim().length > 0) {
+      return code.data;
+    }
+
+    // Fallback para Latin-1 / ISO-8859-1 (usado em etiquetas de patrimônio com "Nrº" ou acentos)
+    if (code.binaryData && code.binaryData.length > 0) {
+      try {
+        const utf8 = new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(code.binaryData));
+        if (utf8 && utf8.trim().length > 0) return utf8;
+      } catch (e) {}
+
+      try {
+        const latin1 = new TextDecoder('iso-8859-1').decode(new Uint8Array(code.binaryData));
+        if (latin1 && latin1.trim().length > 0) return latin1;
+      } catch (e) {}
+
+      return String.fromCharCode.apply(null, code.binaryData);
+    }
+  } catch (err) {
+    console.warn("Erro no jsQR:", err);
+  }
+  return null;
+}
+
+// Varredura contínua em resolução nativa do sensor de vídeo
+let liveScanTimer = null;
+const liveCanvas = document.createElement('canvas');
+const liveCtx = liveCanvas.getContext('2d', { willReadFrequently: true });
+
+function startLiveSecondaryScan() {
+  stopLiveSecondaryScan();
+
+  let nativeDetector = null;
+  if ('BarcodeDetector' in window) {
+    try {
+      nativeDetector = new BarcodeDetector({ formats: ['qr_code'] });
+    } catch (e) {}
+  }
+
+  liveScanTimer = setInterval(async () => {
+    if (!state.isScanning) return;
+    const video = document.querySelector('#qr-reader video');
+    if (!video || video.readyState < 2 || video.videoWidth === 0) return;
+
+    try {
+      // 1. Tenta detecção por hardware nativo (Google Play Services / GPU) no elemento de vídeo
+      if (nativeDetector) {
+        const barcodes = await nativeDetector.detect(video);
+        if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
+          onScanSuccess(barcodes[0].rawValue, { source: 'BarcodeDetector' });
+          return;
+        }
+      }
+
+      // 2. Tenta jsQR com o frame em resolução real
+      if (typeof jsQR !== 'undefined') {
+        const vW = video.videoWidth;
+        const vH = video.videoHeight;
+        if (liveCanvas.width !== vW || liveCanvas.height !== vH) {
+          liveCanvas.width = vW;
+          liveCanvas.height = vH;
+        }
+        liveCtx.drawImage(video, 0, 0, vW, vH);
+        const imgData = liveCtx.getImageData(0, 0, vW, vH);
+        const text = decodeQrCodeFromImageData(imgData, vW, vH);
+        if (text) {
+          onScanSuccess(text, { source: 'jsQR' });
+          return;
+        }
+      }
+    } catch (e) {}
+  }, 200);
+}
+
+function stopLiveSecondaryScan() {
+  if (liveScanTimer) {
+    clearInterval(liveScanTimer);
+    liveScanTimer = null;
+  }
+}
+
+// Processamento robusto de arquivos de imagem/foto
+async function scanImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = async () => {
+        try {
+          const canvas = document.createElement('canvas');
+          const w = img.naturalWidth || img.width;
+          const h = img.naturalHeight || img.height;
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          ctx.drawImage(img, 0, 0);
+
+          // 1. Tenta BarcodeDetector nativo
+          if ('BarcodeDetector' in window) {
+            try {
+              const detector = new BarcodeDetector({ formats: ['qr_code'] });
+              const barcodes = await detector.detect(canvas);
+              if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
+                return resolve(barcodes[0].rawValue);
+              }
+            } catch (err) {}
+          }
+
+          // 2. Tenta jsQR em resolução original (com suporte a Latin-1)
+          const imgData = ctx.getImageData(0, 0, w, h);
+          const text = decodeQrCodeFromImageData(imgData, w, h);
+          if (text) {
+            return resolve(text);
+          }
+
+          // 3. Fallback: se a foto for grande, tenta em escala 50%
+          if (w > 1200 || h > 1200) {
+            const c2 = document.createElement('canvas');
+            c2.width = Math.floor(w / 2);
+            c2.height = Math.floor(h / 2);
+            const ctx2 = c2.getContext('2d');
+            ctx2.drawImage(canvas, 0, 0, c2.width, c2.height);
+            const imgData2 = ctx2.getImageData(0, 0, c2.width, c2.height);
+            const text2 = decodeQrCodeFromImageData(imgData2, c2.width, c2.height);
+            if (text2) {
+              return resolve(text2);
+            }
+          }
+
+          // 4. Fallback final: Html5Qrcode se disponível
+          if (state.html5QrCode) {
+            try {
+              const res = await state.html5QrCode.scanFileV2(file, false);
+              if (res && res.decodedText) {
+                return resolve(res.decodedText);
+              }
+            } catch (h5Err) {}
+          }
+
+          reject(new Error("Nenhum QR Code legível encontrado na foto."));
+        } catch (err) {
+          reject(err);
+        }
+      };
+      img.onerror = () => reject(new Error("Erro ao abrir a imagem."));
+      img.src = e.target.result;
+    };
+    reader.onerror = () => reject(new Error("Erro ao ler o arquivo."));
+    reader.readAsDataURL(file);
+  });
+}
+
 // Inicializar e Controlar Câmera
 function createScannerInstance() {
   try {
     return new Html5Qrcode("qr-reader", {
+      formatsToSupport: [0], // 0 = QR_CODE apenas, sem gastar CPU com códigos 1D
       experimentalFeatures: {
         useBarCodeDetectorIfSupported: true
       },
@@ -180,12 +342,14 @@ async function startCamera() {
     );
 
     state.isScanning = true;
+    startLiveSecondaryScan();
     elements.btnToggleCamera.innerHTML = '<span class="btn-icon">⏹</span> Pausar';
   } catch (err) {
     console.error("Erro ao iniciar câmera:", err);
     elements.laser.classList.remove('active');
     elements.cameraPlaceholder.style.display = 'flex';
     state.isScanning = false;
+    stopLiveSecondaryScan();
     elements.btnToggleCamera.innerHTML = '<span class="btn-icon">▶️</span> Iniciar';
 
     // Recria a instância limpa para que o próximo clique em "Ativar Câmera" não falhe por transição travada
@@ -211,6 +375,7 @@ async function startCamera() {
 }
 
 async function stopCamera() {
+  stopLiveSecondaryScan();
   if (!state.isScanning) return;
   try {
     await state.html5QrCode.stop();
@@ -656,9 +821,9 @@ function setupEventListeners() {
           await stopCamera();
         }
 
-        const scanResult = await state.html5QrCode.scanFileV2(file, false);
-        if (scanResult && scanResult.decodedText) {
-          onScanSuccess(scanResult.decodedText, scanResult);
+        const decodedText = await scanImageFile(file);
+        if (decodedText) {
+          onScanSuccess(decodedText, { source: 'Foto/Arquivo' });
           showToast('QR Code da foto identificado!', 'success');
         } else {
           showToast('Nenhum código encontrado na imagem.', 'error');
@@ -669,7 +834,7 @@ function setupEventListeners() {
         }
       } catch (err) {
         console.warn("Falha ao escanear imagem:", err);
-        showToast('Não foi possível ler o QR code desta foto. Aproxime mais a câmera do quadrado.', 'error');
+        showToast('Não foi possível ler o QR code desta foto. Enquadre mais perto do quadrado.', 'error');
       } finally {
         elements.fileInput.value = '';
       }
