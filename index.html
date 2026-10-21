@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Conferência de Carga - Leitor QR Code</title>
+  <meta name="description" content="Aplicativo rápido para leitura de QR Code em conferência de carga com envio automático para o Google Planilhas.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <!-- HTML5 QR Code Scanner Library -->
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo-area">
+        <div class="logo-icon">📦</div>
+        <div>
+          <h1>CargaScan</h1>
+          <p class="subtitle">Conferência & Registro em Tempo Real</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="btn-settings" class="icon-btn" title="Configurações do Google Sheets" aria-label="Configurar Planilha">
+          ⚙️
+        </button>
+      </div>
+    </header>
+
+    <!-- Context / Batch Bar -->
+    <section class="context-bar">
+      <div class="context-inputs">
+        <div class="input-field">
+          <label for="input-batch">Nº Carga / Lote:</label>
+          <input type="text" id="input-batch" placeholder="Ex: CARGA-104" value="LOTE-01">
+        </div>
+        <div class="input-field">
+          <label for="input-operator">Conferente:</label>
+          <input type="text" id="input-operator" placeholder="Seu nome" value="Conferente 1">
+        </div>
+      </div>
+    </section>
+
+    <!-- Main Scanner Section -->
+    <main class="scanner-section">
+      <!-- Camera Viewport Card -->
+      <div class="camera-card">
+        <div id="reader-container" class="reader-container">
+          <div id="qr-reader"></div>
+          <div id="scanner-laser" class="scanner-laser"></div>
+          <div class="scanner-guides">
+            <span class="corner top-left"></span>
+            <span class="corner top-right"></span>
+            <span class="corner bottom-left"></span>
+            <span class="corner bottom-right"></span>
+          </div>
+          <div id="camera-placeholder" class="camera-placeholder">
+            <div class="placeholder-icon">📷</div>
+            <p>Câmera pausada ou não iniciada</p>
+            <button id="btn-start-camera" class="btn btn-primary">Ativar Câmera</button>
+          </div>
+        </div>
+
+        <!-- Camera Controls -->
+        <div class="camera-controls">
+          <button id="btn-toggle-camera" class="btn btn-sm btn-outline">
+            <span class="btn-icon">⏹</span> Parar Câmera
+          </button>
+          <button id="btn-switch-camera" class="btn btn-sm btn-outline" title="Alternar Câmera Frontal / Traseira">
+            <span class="btn-icon">🔄</span> Trocar Câmera
+          </button>
+          <button id="btn-toggle-torch" class="btn btn-sm btn-outline" title="Ligar Lanterna (se disponível)">
+            <span class="btn-icon">🔦</span> Lanterna
+          </button>
+        </div>
+      </div>
+
+      <!-- Quick Manual Entry Fallback -->
+      <div class="manual-entry-card">
+        <form id="form-manual" class="manual-form">
+          <input type="text" id="manual-text" placeholder="Digitar código/descrição manual..." autocomplete="off">
+          <button type="submit" class="btn btn-secondary">Registrar</button>
+        </form>
+      </div>
+
+      <!-- Quick Status Notification Pill -->
+      <div id="status-toast" class="status-toast hidden">
+        <span id="toast-icon">✅</span>
+        <span id="toast-msg">Item registrado com sucesso!</span>
+      </div>
+
+      <!-- Stats Counters -->
+      <section class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-number" id="count-total">0</span>
+          <span class="stat-label">Total Lido</span>
+        </div>
+        <div class="stat-card stat-success">
+          <span class="stat-number" id="count-synced">0</span>
+          <span class="stat-label">Na Planilha</span>
+        </div>
+        <div class="stat-card stat-warning">
+          <span class="stat-number" id="count-pending">0</span>
+          <span class="stat-label">Pendentes</span>
+        </div>
+      </section>
+
+      <!-- Scanned Items List -->
+      <section class="history-section">
+        <div class="history-header">
+          <h2>Itens Conferidos</h2>
+          <div class="history-actions">
+            <button id="btn-sync-pending" class="btn btn-xs btn-accent" title="Reenviar pendentes para a planilha">
+              ☁️ Sincronizar (<span id="pending-badge">0</span>)
+            </button>
+            <button id="btn-export-csv" class="btn btn-xs btn-outline" title="Baixar histórico em CSV">
+              📥 CSV
+            </button>
+            <button id="btn-clear-history" class="btn btn-xs btn-danger-outline" title="Limpar histórico local">
+              🗑️
+            </button>
+          </div>
+        </div>
+
+        <div id="history-list" class="history-list">
+          <div class="empty-state" id="empty-state">
+            <p>Nenhum material lido ainda.</p>
+            <small>Aponte a câmera para o QR Code de um equipamento ou digite acima.</small>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Modal: Settings / Google Sheets Configuration -->
+    <div id="modal-settings" class="modal-overlay hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Conexão Google Planilhas</h3>
+          <button id="btn-close-modal" class="close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="alert-box">
+            <strong>Como funciona:</strong> Seus QR Codes são enviados diretamente para a planilha via Google Apps Script (100% gratuito e sem necessidade de login no celular).
+          </div>
+
+          <div class="form-group">
+            <label for="script-url">URL do Web App do Google Apps Script:</label>
+            <input type="url" id="script-url" placeholder="https://script.google.com/macros/s/.../exec">
+            <small>Cole a URL de implantação gerada no Apps Script.</small>
+          </div>
+
+          <div class="setup-guide">
+            <h4>Passo a passo rápido (2 minutos):</h4>
+            <ol>
+              <li>Crie uma nova planilha no seu <strong>Google Drive</strong>.</li>
+              <li>No menu superior, clique em <strong>Extensões > Apps Script</strong>.</li>
+              <li>Apague o código que estiver lá e cole o código pronto abaixo.</li>
+              <li>Clique em <strong>Implantar > Nova implantação</strong>.</li>
+              <li>Selecione Tipo: <strong>App da Web</strong>.</li>
+              <li>Em <em>"Quem tem acesso"</em>, selecione <strong>Qualquer pessoa (Anyone)</strong>.</li>
+              <li>Clique em <strong>Implantar</strong>, autorize o acesso e copie a <strong>URL do App da Web</strong> aqui!</li>
+            </ol>
+            <button id="btn-copy-script" class="btn btn-sm btn-outline btn-block">
+              📋 Copiar Código do Google Apps Script
+            </button>
+          </div>
+
+          <div class="form-group checkbox-group">
+            <label>
+              <input type="checkbox" id="chk-sound" checked> Tocar bip sonoro ao ler
+            </label>
+            <label>
+              <input type="checkbox" id="chk-vibrate" checked> Vibrar celular ao ler
+            </label>
+            <label>
+              <input type="checkbox" id="chk-continuous" checked> Leitura contínua (conferência ágil)
+            </label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="btn-test-connection" class="btn btn-outline">Testar Conexão</button>
+          <button id="btn-save-settings" class="btn btn-primary">Salvar Configurações</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
